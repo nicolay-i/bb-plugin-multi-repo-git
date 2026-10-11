@@ -1,21 +1,19 @@
-# Multi Repo Git
+## Keep subprojects inside one workspace
 
-Explicit multi-repository workspaces and environment-local Source Control for BB, without replacing the native sidebar or managing worktrees.
+Connect folder-based projects such as web, API and mobile under a shared workspace instead of keeping them as unrelated sidebar entries. Use **Edit workspace** in the project's native menu to choose the folders. They remain real BB projects, grouped beneath the workspace alongside its **main** chat group. Disconnecting a folder never deletes its project, chats or files.
 
-## Workspaces built on existing projects
+## Chat about the whole project or one subproject
 
-Use **Edit workspace** in a project's native menu to select child folders. The plugin connects the corresponding BB projects and groups them under the workspace; the main repository remains in the **main** group. Removing a folder from the workspace does not delete its project or files.
+Start a chat in the workspace's **main** group for cross-project planning and work from the workspace environment. Choose a child project to keep the conversation and working environment scoped to that subproject. Both use BB's native thread creation, project selection and environment controls; the plugin does not create a separate chat system.
 
-BB retains its native thread rows, menus and actions. Each project initially shows five top-level thread families; **Show more** reveals the next page. Descendants do not consume extra slots. Project limits are independent and reset on collapse. The page size is configurable from 1 to 100.
+## Choose how many chats stay visible
 
-## Source Control for explicit repositories
+Set **Threads per page** from 1 to 100; the default is 5. Each project gets its own initial limit and **Show more** button. The limit counts top-level thread families, so replies and child threads stay with their parent without taking extra slots. Collapsing a group resets its limit; collapsing a workspace also resets its child-project limits. Changing the setting updates the sidebar immediately without deleting or archiving chats.
 
-Open **New tab → Source Control**. A workspace shows its main Git repository and explicitly connected paths in the active environment. An ordinary or child project shows only its own repository.
+## Repository-local Source Control
 
-Inspect status and diffs, stage or unstage files, create branches, commit and push within the selected repository. Missing, unavailable or out-of-environment paths remain visible with an explanation and no Git mutation controls. The plugin does not discover arbitrary nested repositories.
+Source Control is also available through **New tab → Source Control**. A workspace lists its main repository and explicitly connected repositories in the active environment. A child project lists only its own repository. Inspect diffs, stage or unstage files, create branches, commit and push in the selected repository. Unavailable or unsafe paths remain visible without Git mutation controls.
 
-Returning from a file immediately restores the last successful snapshot and selected repository, then revalidates in the background. Git mutation controls remain unavailable until validation succeeds. Read-only scan concurrency adapts to the host's CPU count and load.
+## Requirements and native behavior
 
-## Compatibility
-
-Requires **BB ≥0.46 and SDK ≥0.6.37**, with the built-in `thread-list`. Replacement sidebar plugins are not automatically compatible. BB owns project and thread collapse persistence and may expand the selected thread's ancestor path. Worktree creation and lifecycle also remain BB-owned.
+Requires **BB ≥0.46 and SDK ≥0.6.37**, with the built-in `thread-list`. BB retains native rows, menus, drag-and-drop and collapse persistence, and owns worktree lifecycle. Workspace membership is one level: a child project cannot itself own another workspace. Replacement sidebar plugins are not automatically compatible.

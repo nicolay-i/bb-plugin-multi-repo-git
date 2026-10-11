@@ -1,7 +1,25 @@
 # Multi Repo Git for BB
 
-A BB plugin that adds safe **Source Control** and explicit multi-folder
-workspaces to BB projects.
+Group folder-based **subprojects inside one workspace**, then choose where to
+chat: about the whole project in **main**, or within a specific subproject.
+Set how many thread families each project shows, with independent **Show more**
+controls. Repository-local **Source Control** is also included.
+
+## Workspaces and chat scope
+
+- Connect folders such as **web**, **api** and **mobile** beneath a workspace
+  through **Edit workspace** in the native project menu.
+- Start a workspace chat in **main** for cross-project planning and work from
+  the workspace's active environment.
+- Start a chat under a child project to work within that subproject's own
+  project and active environment.
+- Set **Threads per page** from **1 to 100** (default **5**) to control the
+  initial number of visible thread families independently for each project.
+
+Use BB's native **New thread** flow and choose the workspace or child project.
+The plugin groups existing BB projects; it does not introduce a separate chat
+system. Disconnecting a folder leaves its project, chats and files intact.
+Workspace membership is one level: a child project cannot itself own a workspace.
 
 ## Compatibility
 
@@ -15,19 +33,18 @@ the minimum SDK version of the running BB instance.
 
 ## Current features
 
+- **Edit workspace** groups selected child folders as real BB projects,
+  reusing matching projects and their available machine sources where possible;
+- workspace chats appear in **main**, while child projects keep their own chats;
+- configurable thread-family limits, independent **Show more** controls, and
+  native thread ordering, groups and actions;
+- native Project settings, Rename, Remove, sections, pinned threads and
+  drag-and-drop remain available;
 - **New tab → Actions → Source Control** for every thread;
-- an ordinary project shows only the Git repository of its active environment;
 - a workspace root shows its own repository plus explicitly linked member paths;
+- an ordinary or child project shows only its own active environment;
 - unavailable, missing, non-repository, and out-of-workspace members stay visible
   with an explanation and without Git mutation controls;
-- a child project shows only its own active environment;
-- **Edit workspace** augments the native project menu without replacing Project
-  settings, Rename, Remove, sections, pinned threads, drag-and-drop, or native
-  thread actions;
-- selected folders become real BB projects, reusing matching projects and their
-  available machine sources where possible;
-- workspace roots gain a `main` subgroup while connected projects remain native
-  BB project/thread components;
 - repository-local status, diff, stage, unstage, branch creation, commit, and
   push with path confinement and literal Git pathspecs.
 
@@ -111,15 +128,27 @@ BB does not own those historical paths either.
 
 ## Install from GitHub
 
-Once the `v0.1.0` tag is published:
-
 ```bash
 bb plugin install 'git:https://github.com/nicolay-i/bb-plugin-multi-repo-git.git@^0.1.0' --yes
 ```
 
 ## Screenshots
 
-![Workspace and Source Control](docs/screenshots/source-control.png)
+### Nested subprojects and a workspace-wide chat
+
+![Workspace with nested subprojects and a chat in main](docs/screenshots/workspace-chats.png)
+
+### A chat scoped to one subproject
+
+![Chat in the API subproject](docs/screenshots/subproject-chat.png)
+
+### Configurable thread limits
+
+![Threads per page setting](docs/screenshots/thread-limit.png)
+
+### Source Control
+
+![Repository-local Source Control in a compact window](docs/screenshots/source-control.png)
 
 [Native project menu](docs/screenshots/workspace-menu.png) ·
 [Workspace editor](docs/screenshots/workspace-editor.png)

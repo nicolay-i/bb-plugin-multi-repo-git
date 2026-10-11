@@ -18,7 +18,7 @@
   },
   "bb": {
     "name": "Multi Repo Git",
-    "description": "Explicit multi-folder BB workspaces with safe environment-local Source Control.",
+    "description": "Group subprojects under one workspace, chat at either level, and choose how many thread families each project shows. Repository-local Source Control is also included.",
     "branding": {
       "icon": "FolderGit"
     },
