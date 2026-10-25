@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-multi-repo-git",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -17,7 +17,7 @@
     "test": "vitest run"
   },
   "bb": {
-    "name": "Multi Repo Git",
+    "name": "Atrium — MonoRepo Projects",
     "description": "Group subprojects under one workspace, chat at either level, and choose how many thread families each project shows. Repository-local Source Control is also included.",
     "branding": {
       "icon": "FolderGit"

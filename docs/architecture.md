@@ -1,8 +1,8 @@
-# Multi Repo Git architecture
+# Atrium — MonoRepo Projects architecture
 
 ## Product model
 
-Multi Repo Git adds an explicit workspace layer over real BB projects.
+Atrium — MonoRepo Projects adds an explicit workspace layer over real BB projects.
 Filesystem nesting never groups projects automatically. **Edit workspace**
 links direct child projects selected from folders beneath a root project.
 

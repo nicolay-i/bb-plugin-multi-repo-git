@@ -416,5 +416,5 @@ export default function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.log.info("Multi Repo Git loaded");
+  bb.log.info("Atrium — MonoRepo Projects loaded");
 }

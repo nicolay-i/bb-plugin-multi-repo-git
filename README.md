@@ -1,4 +1,4 @@
-# Multi Repo Git for BB
+# Atrium — MonoRepo Projects for BB
 
 Group folder-based **subprojects inside one workspace**, then choose where to
 chat: about the whole project in **main**, or within a specific subproject.
@@ -60,7 +60,7 @@ and actions. Descendants remain with their parent and do not consume extra
 slots. Collapsing a project, child project or `main` group resets its limit;
 collapsing a workspace also resets its child-project limits.
 
-Set **Threads per page** in the installed **Multi Repo Git** plugin's settings
+Set **Threads per page** in the installed **Atrium — MonoRepo Projects** plugin's settings
 (an integer from 1 to 100, default 5). Changes immediately reset every project's
 initial limit. BB persists project and thread collapse state (`thread-list`:
 `collapsedProjects`, `collapsedThreads`); the plugin persists `main` locally.
