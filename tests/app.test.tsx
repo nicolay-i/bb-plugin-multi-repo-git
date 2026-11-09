@@ -204,7 +204,7 @@ describe("plugin stylesheet lifecycle", () => {
       {},
       {
         sidebarThreads: {
-          projects: [{ id: "project-root", name: "Root", isPersonal: false }],
+          projects: [{ id: "project-root", name: "Root", isPersonal: false, href: "/projects/project-root", settingsHref: "/settings/projects/project-root" }],
         },
         rpc: { workspace_relations: () => ({ links: [] }) },
       },
@@ -216,7 +216,7 @@ describe("plugin stylesheet lifecycle", () => {
     )!;
     const panel = renderSlot(
       action,
-      { threadId: "thread-test", params: null },
+      { threadId: "thread-test", params: null, environment: null },
       {
         rpc: {
           workspace_status: () => ({
@@ -264,7 +264,7 @@ describe("workspace collapse persistence", () => {
         {
           sidebarThreads: {
             projects: [
-              { id: "collapsed-project", name: "Collapsed project", isPersonal: false },
+              { id: "collapsed-project", name: "Collapsed project", isPersonal: false, href: "/projects/collapsed-project", settingsHref: "/settings/projects/collapsed-project" },
             ],
           },
           rpc: { workspace_relations: () => ({ links: [] }) },
@@ -1007,7 +1007,7 @@ describe("workspace folder picker", () => {
       {},
       {
         sidebarThreads: {
-          projects: [{ id: "project-root", name: "Root", isPersonal: false }],
+          projects: [{ id: "project-root", name: "Root", isPersonal: false, href: "/projects/project-root", settingsHref: "/settings/projects/project-root" }],
         },
         rpc: {
           workspace_relations: () => ({ links: [] }),
@@ -1076,7 +1076,7 @@ describe("Source Control thread panel", () => {
       .mockRejectedValueOnce(deadline).mockResolvedValueOnce({
         ...snapshot, repositories: [{ ...availableRepository(), branch: "retry-restored" }],
       });
-    const props = { threadId: "thread-deadline", params: null };
+    const props = { threadId: "thread-deadline", params: null, environment: null };
     const first = renderSlot(action, props, { rpc: { workspace_status: status } });
     await first.findByText(/Repository scan timed out/);
     expect(first.queryByText("Repositories not found.")).toBeNull();
@@ -1111,7 +1111,7 @@ describe("Source Control thread panel", () => {
     let resolveRefresh!: (value: typeof snapshot) => void;
     const pending = new Promise<typeof snapshot>((resolve) => { resolveRefresh = resolve; });
     const status = vi.fn().mockResolvedValueOnce(snapshot).mockReturnValueOnce(pending);
-    const props = { threadId: "thread-file-return", params: null };
+    const props = { threadId: "thread-file-return", params: null, environment: null };
     const first = renderSlot(action, props, { rpc: { workspace_status: status } });
     fireEvent.click(await first.findByRole("button", { name: /child/ }));
     await waitFor(() => expect(first.getByRole("button", { name: /child/ }).getAttribute("aria-pressed")).toBe("true"));
@@ -1128,7 +1128,7 @@ describe("Source Control thread panel", () => {
     returned.lifecycle.unmount();
 
     // A different chat must not receive the previous chat's cached workspace.
-    const other = renderSlot(action, { threadId: "thread-other-return", params: null }, {
+    const other = renderSlot(action, { threadId: "thread-other-return", params: null, environment: null }, {
       rpc: { workspace_status: () => Promise.reject(new Error("other workspace offline")) },
     });
     expect(other.queryByText("child")).toBeNull();
@@ -1145,7 +1145,7 @@ describe("Source Control thread panel", () => {
       environmentId: "environment-pending",
       repositories: [availableRepository()], legacyWorktreeSets: [],
     });
-    const props = { threadId: "thread-pending-return", params: null };
+    const props = { threadId: "thread-pending-return", params: null, environment: null };
     const first = renderSlot(action, props, { rpc: { workspace_status: status } });
     await waitFor(() => expect(status).toHaveBeenCalledTimes(1));
     first.lifecycle.unmount();
@@ -1165,7 +1165,7 @@ describe("Source Control thread panel", () => {
     const action = app.threadPanelActions.find((item) => item.id === "source-control")!;
     const slot = renderSlot(
       action,
-      { threadId: "thread-test", params: null },
+      { threadId: "thread-test", params: null, environment: null },
       { rpc: { workspace_status: () => ({
         environmentId: "environment-test",
         repositories: [availableRepository()],
@@ -1186,7 +1186,7 @@ describe("Source Control thread panel", () => {
     const action = app.threadPanelActions.find((item) => item.id === "source-control")!;
     const slot = renderSlot(
       action,
-      { threadId: "thread-test", params: null },
+      { threadId: "thread-test", params: null, environment: null },
       { rpc: { workspace_status: () => ({
         environmentId: "environment-test",
         repositories: [{
@@ -1216,7 +1216,7 @@ describe("Source Control thread panel", () => {
     const action = app.threadPanelActions.find((item) => item.id === "source-control")!;
     const slot = renderSlot(
       action,
-      { threadId: "thread-test", params: null },
+      { threadId: "thread-test", params: null, environment: null },
       { rpc: { workspace_status: () => ({
         environmentId: "environment-test",
         repositories: [availableRepository()],

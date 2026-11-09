@@ -1,0 +1,163 @@
+import { DatabaseSync } from "node:sqlite";
+import { mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { resolve, join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { queryLatest } from "../../lib/recent/query-worker.mjs";
+import { messageTime, topRecent, type MessageIndex, type EventRow } from "../../lib/recent/data.js";
+import { assistant, event, tool, user } from "./fixtures";
+
+const cleanups: (() => void)[] = [];
+afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); vi.restoreAllMocks(); });
+function database(path = ":memory:") {
+  const db = new DatabaseSync(path);
+  let closed = false;
+  const close = () => { if (!closed) { db.close(); closed = true; } };
+  cleanups.push(close);
+  db.exec(`CREATE TABLE threads(id TEXT PRIMARY KEY,visibility TEXT DEFAULT 'visible',archived_at INTEGER,deleted_at INTEGER,updated_at INTEGER);
+    CREATE TABLE events(id TEXT PRIMARY KEY,thread_id TEXT,sequence INTEGER,created_at INTEGER,type TEXT,item_kind TEXT,parent_tool_call_id TEXT,data TEXT);
+    CREATE INDEX events_thread_type_sequence_idx ON events(thread_id,type,sequence);
+    CREATE INDEX events_thread_type_item_kind_sequence_idx ON events(thread_id,type,item_kind,sequence);
+    CREATE INDEX events_completed_item_truncation_idx ON events(item_kind,created_at,id) WHERE type='item/completed';`);
+  let next = 0;
+  const histories = new Map<string, EventRow[]>();
+  function thread(id: string, visibility = "visible", archived: number | null = null, deleted: number | null = null) {
+    db.prepare("INSERT INTO threads VALUES(?,?,?,?,?)").run(id, visibility, archived, deleted, 999999);
+    histories.set(id, []);
+  }
+  function add(id: string, row: EventRow, options: { nullKind?: boolean; parent?: string } = {}) {
+    const item = (row.data as any).item;
+    db.prepare("INSERT INTO events VALUES(?,?,?,?,?,?,?,?)").run(`evt_${++next}`, id, row.seq, row.createdAt, row.type,
+      options.nullKind ? null : item?.type ?? null, options.parent ?? item?.parentToolCallId ?? null, JSON.stringify(row.data));
+    histories.get(id)!.push(row);
+  }
+  function oracle() {
+    const index = new Map<string, MessageIndex>();
+    for (const row of db.prepare("SELECT id FROM threads WHERE visibility='visible' AND archived_at IS NULL AND deleted_at IS NULL").all() as { id: string }[]) {
+      const times = histories.get(row.id)!.flatMap(event => { const at = messageTime(event); return at === null ? [] : [at]; });
+      index.set(row.id, { lastMessageAt: times.length ? Math.max(...times) : null, lastSeq: 0 });
+    }
+    return topRecent(index);
+  }
+  return { db, thread, add, oracle, close };
+}
+
+describe("Точный read-only server query", () => {
+  it("совпадает с полным oracle для240тредов; старый тред с новым user не теряется", () => {
+    const f = database();
+    for (let i = 0; i < 240; i++) {
+      const id = `thr_${String(i).padStart(3, "0")}`; f.thread(id);
+      f.add(id, user(i + 1, 1)); f.add(id, assistant(1000 + i, 2));
+      for (let n = 0; n < 5; n++) f.add(id, tool(50000 + n, n + 3));
+    }
+    f.add("thr_000", user(99999, 99));
+    f.add("thr_001", event("system/manager/user_message", { text: "legacy" }, 77777, 90));
+    f.add("thr_002", assistant(88888, 90), { nullKind: true });
+    f.add("thr_003", assistant(66666, 90, { type: "plan" }));
+    expect(queryLatest(f.db).rows).toEqual(f.oracle());
+    expect(queryLatest(f.db).rows[0]).toEqual({ threadId: "thr_000", lastMessageAt: 99999 });
+  });
+  it("legacy NULL completions используют existing global date range, не historical thread walk", () => {
+    const f = database();
+    for (let i = 0; i < 75; i++) {
+      const id = `thr_${String(i).padStart(3, "0")}`; f.thread(id); f.add(id, assistant(1000 + i, 1));
+    }
+    f.thread("thr_legacy");
+    for (let i = 0; i < 1500; i++) f.add("thr_legacy", tool(i % 10, i + 1), { nullKind: true });
+    f.add("thr_legacy", assistant(9999, 2000), { nullKind: true });
+    const prepare = vi.spyOn(f.db, "prepare");
+    expect(queryLatest(f.db).rows).toEqual(f.oracle());
+    const sql = prepare.mock.calls.find(([sql]) => sql.includes("WITH recent_ids"))![0];
+    const plan = f.db.prepare("EXPLAIN QUERY PLAN " + sql).all(1000) as { detail: string }[];
+    expect(plan.some(row => row.detail.includes("events_completed_item_truncation_idx") && row.detail.includes("created_at>"))).toBe(true);
+    expect(plan.some(row => row.detail.includes("events_thread_type_item_kind_sequence_idx"))).toBe(false);
+    prepare.mockRestore();
+  });
+  it("не предполагает sequence~createdAt и не останавливается после первого текста", () => {
+    const f = database(); f.thread("thr_one");
+    f.add("thr_one", user(500, 1)); f.add("thr_one", assistant(400, 2));
+    for (let i = 0; i < 250; i++) f.add("thr_one", tool(1000 + i, 3 + i));
+    expect(queryLatest(f.db).rows).toEqual([{ threadId: "thr_one", lastMessageAt: 500 }]);
+  });
+  it("обрабатывает ВСЕ равные даты порога до стабильного top50", () => {
+    const f = database();
+    for (let i = 79; i >= 0; i--) { const id = `thr_${String(i).padStart(3, "0")}`; f.thread(id); f.add(id, assistant(1000, 1)); }
+    expect(queryLatest(f.db).rows).toEqual(f.oracle());
+    expect(queryLatest(f.db).rows.at(-1)?.threadId).toBe("thr_049");
+  });
+  it("нет недоказанного порога при числе assistant-тредов меньше50", () => {
+    const f = database(); f.thread("thr_assistant"); f.thread("thr_user"); f.thread("thr_legacy");
+    f.add("thr_assistant", assistant(1000, 1)); f.add("thr_user", user(1, 1));
+    f.add("thr_legacy", event("system/manager/user_message", { text: "legacy" }, 2, 1));
+    expect(queryLatest(f.db).rows).toEqual(f.oracle()); expect(queryLatest(f.db).rows).toHaveLength(3);
+  });
+  it("legacy null item_kind, plan и вложения сохраняют семантику", () => {
+    const f = database();
+    for (const id of ["thr_legacy", "thr_plan", "thr_file", "thr_hiddenpart"]) f.thread(id);
+    f.add("thr_legacy", assistant(300, 1), { nullKind: true });
+    f.add("thr_plan", assistant(400, 1, { type: "plan" }));
+    f.add("thr_file", user(500, 1, { input: [{ type: "localFile", path: "synthetic" }] }));
+    f.add("thr_hiddenpart", user(99999, 1, { input: [{ type: "image", visibility: "agent-only" }] }));
+    expect(queryLatest(f.db).rows).toEqual(f.oracle());
+  });
+  it("JS Unicode trim, системные запросы/retry/reasoning/delta/context-clear не поднимают дату", () => {
+    const f = database(); f.thread("thr_one"); f.add("thr_one", user(100, 1));
+    f.add("thr_one", user(999, 2, { input: [{ type: "text", text: " \u00a0\u2003\ufeff " }] }));
+    f.add("thr_one", user(999, 3, { initiator: "system" }));
+    f.add("thr_one", user(999, 4, { retryOfRequestId: "retry" }));
+    f.add("thr_one", assistant(999, 5, { type: "reasoning", text: "reasoning" }));
+    f.add("thr_one", event("item/agentMessage/delta", { delta: "partial" }, 999, 6));
+    f.add("thr_one", event("system/operation", { operation: "context_clear" }, 999, 7));
+    expect(queryLatest(f.db).rows).toEqual([{ threadId: "thr_one", lastMessageAt: 100 }]);
+  });
+  it("исключает parentToolCallId и из JSON, и из нормализованной колонки", () => {
+    const f = database(); f.thread("thr_one"); f.add("thr_one", user(100, 1));
+    f.add("thr_one", assistant(999, 2, { parentToolCallId: "tool" }));
+    f.add("thr_one", assistant(999, 3), { parent: "tool" });
+    expect(queryLatest(f.db).rows).toEqual([{ threadId: "thr_one", lastMessageAt: 100 }]);
+  });
+  it("исключает hidden/archived/deleted до global limit, metadata rename/read не влияет", () => {
+    const f = database();
+    f.thread("thr_valid"); f.thread("thr_hidden", "hidden"); f.thread("thr_archived", "visible", 1); f.thread("thr_deleted", "visible", null, 1);
+    for (const id of ["thr_valid", "thr_hidden", "thr_archived", "thr_deleted"]) f.add(id, assistant(id === "thr_valid" ? 100 : 999, 1));
+    expect(queryLatest(f.db).rows).toEqual(f.oracle());
+    f.db.prepare("UPDATE threads SET updated_at=99999999").run();
+    expect(queryLatest(f.db).rows).toEqual([{ threadId: "thr_valid", lastMessageAt: 100 }]);
+  });
+  it("replacement user до final и edited assistant после final меняют порядок", () => {
+    const f = database(); f.thread("thr_target"); f.thread("thr_comparator");
+    f.add("thr_target", assistant(100, 1)); f.add("thr_comparator", assistant(200, 1));
+    expect(queryLatest(f.db).rows[0]?.threadId).toBe("thr_comparator");
+    f.add("thr_target", user(300, 2)); expect(queryLatest(f.db).rows[0]?.lastMessageAt).toBe(300);
+    f.add("thr_target", assistant(400, 3)); expect(queryLatest(f.db).rows[0]?.lastMessageAt).toBe(400);
+  });
+  it("отличает пустой результат от ошибки и отказывает без обязательного existing index", () => {
+    const f = database(); expect(queryLatest(f.db).rows).toEqual([]);
+    f.db.exec("DROP INDEX events_completed_item_truncation_idx");
+    expect(() => queryLatest(f.db)).toThrow();
+  });
+  it("не возвращает тела сообщений, поддерживает top20 и принудительный budget", () => {
+    const f = database(); f.thread("thr_one"); f.add("thr_one", user(100, 1));
+    expect(queryLatest(f.db, 20).rows).toEqual([{ threadId: "thr_one", lastMessageAt: 100 }]);
+    expect(JSON.stringify(queryLatest(f.db))).not.toContain('"text"');
+    expect(() => queryLatest(f.db, 51)).toThrow(); expect(() => queryLatest(f.db, 50, -1)).toThrow();
+  });
+  it("does not count scheduler pauses as query CPU work", () => {
+    const f = database(); f.thread("thr_one"); f.add("thr_one", user(100, 1));
+    vi.spyOn(performance, "now").mockReturnValueOnce(0).mockReturnValue(10000);
+    expect(queryLatest(f.db)).toEqual({ rows: [{ threadId: "thr_one", lastMessageAt: 100 }], queryMs: 10000 });
+  });
+  it("still rejects a query that exhausts its CPU work budget", () => {
+    const f = database(); f.thread("thr_one"); f.add("thr_one", user(100, 1));
+    vi.spyOn(process, "cpuUsage").mockReturnValueOnce({ user: 0, system: 0 }).mockReturnValue({ user: 6000000, system: 0 });
+    expect(() => queryLatest(f.db)).toThrow();
+  });
+  it("фактически работает в node:sqlite readOnly; запись отказана, файл не изменён", () => {
+    const base = resolve(".tmp"); mkdirSync(base, { recursive: true }); const dir = mkdtempSync(join(base, "sqlite-unit-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const path = join(dir, "test.db"), f = database(path); f.thread("thr_one"); f.add("thr_one", user(100, 1)); f.close();
+    const before = statSync(path); const readonly = new DatabaseSync(path, { readOnly: true });
+    try { expect(queryLatest(readonly).rows).toEqual([{ threadId: "thr_one", lastMessageAt: 100 }]); expect(() => readonly.exec("CREATE TABLE forbidden(id)")).toThrow(); }
+    finally { readonly.close(); }
+    expect(statSync(path).mtimeMs).toBe(before.mtimeMs); expect(statSync(path).size).toBe(before.size);
+  });
+});

@@ -20,6 +20,8 @@ import { Icon } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { WorkspaceSidebarController, mountWorkspaceProjectMenu } from "./sidebar.js";
+import { RecentThreadList } from "./lib/recent/list.js";
+import { SidebarModeControls } from "./lib/recent/top-switch.js";
 import {
   mountLazyPluginStylesheet,
   usePluginStylesheet,
@@ -591,6 +593,13 @@ function SourceControlContent({ threadId }: { threadId: string }) {
 }
 
 export default definePluginApp((app) => {
+  app.slots.experimental_threadList({
+    id: "recent",
+    title: "Recent chats",
+    description: "The latest messages across all projects, in the left sidebar.",
+    component: RecentThreadList,
+  });
+  app.slots.experimental_appOverlay({ id: "sidebar-view-switch", component: SidebarModeControls });
   app.contentScripts.register({
     id: "workspace-project-menu",
     mount: () => {
@@ -606,12 +615,19 @@ export default definePluginApp((app) => {
     id: "workspace-sidebar-controller",
     component: WorkspaceSidebarController,
   });
-  app.slots.threadPanelAction({
+  app.slots.experimental_tab({
+    context: { kind: "thread" },
+    availability: "action",
     id: "source-control",
     title: "Source Control",
     icon: "GitBranch",
     layout: "flush",
     component: SourceControlPanel,
-    run: ({ openPanel }) => { openPanel({ title: "Source Control" }); },
+    run: ({ experimental_panel }) => {
+      experimental_panel.openTab({
+        tab: { id: "source-control", context: { kind: "thread" }, availability: "action" },
+        title: "Source Control",
+      });
+    },
   });
 });

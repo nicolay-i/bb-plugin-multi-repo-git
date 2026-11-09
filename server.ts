@@ -1,6 +1,7 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { hostContract, rpcContract } from "./contract.js";
+import registerRecent from "./lib/recent/server.js";
 import {
   arrangeWorkspaceSectionOrder,
   linkWorkspaceProject,
@@ -416,5 +417,6 @@ export default function plugin(bb: BbPluginApi) {
     },
   });
 
+  registerRecent(bb);
   bb.log.info("Atrium — MonoRepo Projects loaded");
 }

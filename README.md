@@ -1,9 +1,14 @@
 # Atrium — MonoRepo Projects for BB
 
+> Recent runs all SQLite reads in an isolated OS child process. Never move this
+> connection into BB's process or worker threads.
+
 Group folder-based **subprojects inside one workspace**, then choose where to
 chat: about the whole project in **main**, or within a specific subproject.
 Set how many thread families each project shows, with independent **Show more**
-controls. Repository-local **Source Control** is also included.
+controls. Switch to **Recent** for the latest 50 conversations, with title/project
+search and simultaneous work/unread indicators. Repository-local **Source Control**
+is also included.
 
 ## Workspaces and chat scope
 
@@ -23,16 +28,28 @@ Workspace membership is one level: a child project cannot itself own a workspace
 
 ## Compatibility
 
-Requires **BB ≥0.46 and SDK ≥0.6.37**, with the built-in `thread-list`
-sidebar provider. Installation and actual UI behavior were verified on this
-build. BB builds with the same version number can ship different SDKs:
-the 0.46.0 build with SDK 0.4.97 lacks the required `thread-list` and is not
-supported. Compatibility with replacement sidebar plugins is not guaranteed.
-The SDK 0.4.97 development pin provides compile-time types; it does not define
-the minimum SDK version of the running BB instance.
+Version **0.1.3** requires **BB ≥0.48.1, SDK ≥0.6.104 and Node ≥24.20.0**,
+with the built-in `thread-list` provider for Workspaces. Earlier v0.1.2 releases
+retain their previous requirements.
+
+Recent uses a read-only `node:sqlite` connection in a **separate OS process** to
+BB's `bb.db`, found through the documented server data directory. The reader
+refuses execution in `worker_threads` before importing SQLite. Its query depends on BB's internal
+events schema and existing indexes, verified on BB 0.48.1. It runs read-only SQL,
+does not write chat data or change the schema, indexes or PRAGMA, and returns no
+message bodies. SQLite still participates in WAL/shared-memory locking, which is
+why OS process isolation is required. An incompatible schema fails explicitly;
+there is no history-download fallback.
+
+The upper view switch decorates the native sidebar shell. Its DOM anchor is
+internal, not a versioned SDK header slot. Other replacement sidebars and future
+BB layouts need separate verification.
 
 ## Current features
 
+- **Workspaces | Recent** switches between the native project tree and the latest
+  50 conversations, with local title/project search and native chat actions;
+- work and unread indicators remain visible together, without shifting titles;
 - **Edit workspace** groups selected child folders as real BB projects,
   reusing matching projects and their available machine sources where possible;
 - workspace chats appear in **main**, while child projects keep their own chats;
@@ -51,6 +68,39 @@ the minimum SDK version of the running BB instance.
 The domain model and parity requirements are documented in
 [`docs/architecture.md`](docs/architecture.md) and
 [`docs/sidebar-parity.md`](docs/sidebar-parity.md).
+
+## Workspaces / Recent
+
+Use **Workspaces | Recent** above the left sidebar list. Workspaces keeps BB's
+native project tree, workspace grouping and pagination. Recent shows the latest
+50 visible, non-archived conversations across all projects, ordered by saved
+user/assistant messages and edits—not thread `updatedAt`. Opening, reading or
+renaming a chat does not move it. The search field filters titles and project
+names within those latest 50 chats, without reading message bodies or issuing
+additional RPCs. Clearing it restores the list. The central chat and draft are
+not navigated. Busy unread chats keep the work indicator on the left and an
+unread badge beside the bold title; idle unread chats keep their native dot.
+Refresh retains visible rows and search, while errors or disconnection hide
+unverified data.
+
+The mode preference is shared across BB clients. Switching uses revision checks;
+a concurrent change produces an explicit retry message rather than overwriting
+another client. Registration does not write the preference. If BB is using its
+Automatic mode or another provider, choose Workspaces or Recent explicitly to
+select one of these modes; BB's Automatic provider choice is left unchanged.
+Concurrent Recent reads share one worker only within the same persisted-data revision.
+Closing the last reader aborts that worker; changed data cannot reuse its snapshot.
+Each query uses an isolated Node child process. The reader closes its snapshot
+before returning validated metadata over IPC, without waiting for process
+teardown. Query work has a 5-second CPU budget; the
+server separately enforces the unchanged 8-second wall deadline and terminates
+stalled workers. Scheduler pauses do not consume the SQL CPU budget.
+A transient failure remains visible, but the next relevant message update can
+recover the list without requiring a manual Retry. There is no polling/retry
+loop, alternate data source, or stale-on-error result.
+
+If the separate `recent-chats` plugin is installed, disable it when using the
+integrated mode to avoid duplicate controls. It is not a dependency of Atrium.
 
 ## Sidebar thread pagination
 
@@ -129,10 +179,14 @@ BB does not own those historical paths either.
 ## Install from GitHub
 
 ```bash
-bb plugin install 'git:https://github.com/nicolay-i/bb-plugin-multi-repo-git.git@^0.1.0' --yes
+bb plugin install 'git:https://github.com/nicolay-i/bb-plugin-multi-repo-git.git@^0.1.3' --yes
 ```
 
 ## Screenshots
+
+### Recent chats across projects
+
+![Recent chats with title/project search and a preserved draft](docs/screenshots/recent-chats.png)
 
 ### Nested subprojects and a workspace-wide chat
 
