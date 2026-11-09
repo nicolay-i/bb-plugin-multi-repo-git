@@ -7,22 +7,21 @@ import { experimental_Icon as Icon, ThreadTitle,
   type PluginSidebarThread, type PluginThreadListProps,
   type PluginThreadActionTarget } from "@get-bb/plugin-sdk/app";
 import { RecentController, type RecentState } from "./recent-controller.js";
+import { workingThreadIds } from "./work-status.js";
 import { usePluginStylesheet } from "../../stylesheet.js";
 
 
 const buttonClass = "rounded-md border border-sidebar-border px-2 py-1 text-xs hover:bg-sidebar-accent focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-50";
 
-function RecentRow({ thread, project, at, active, onNavigate }: {
-  thread: PluginSidebarThread; project: string; at: number; active: boolean; onNavigate(): void;
+function RecentRow({ thread, project, at, active, working, onNavigate }: {
+  thread: PluginSidebarThread; project: string; at: number; active: boolean; working: boolean; onNavigate(): void;
 }) {
   const navigate = useBbNavigate();
   const rowStatus = useSidebarThreadRowStatus(thread.id);
   const { hasUnsubmittedDraft } = useSidebarThreadDraft(thread.id);
-  const working = ["active", "provisioning", "starting", "stopping"].includes(thread.runtimeStatus)
-    || Object.values(thread.activity).some(count => count > 0);
   const indicator = hasUnsubmittedDraft && thread.indicator !== "unread-error" && thread.indicator !== "waiting-for-input"
     ? working ? "working-draft" : thread.indicator === "none" ? "draft" : thread.indicator : thread.indicator;
-  const unreadHidesWork = working && (indicator === "unread-success" || indicator === "unread-error");
+  const workIsHidden = working && ["none", "draft", "unread-success", "unread-error"].includes(indicator);
   const shortcut = useSidebarThreadShortcut(thread.id);
   const split = experimental_useSidebarThreadSplit(thread.id);
   const target: PluginThreadActionTarget = { id: thread.id, projectId: thread.projectId,
@@ -47,8 +46,8 @@ function RecentRow({ thread, project, at, active, onNavigate }: {
         aria-current={active ? "page" : undefined} aria-keyshortcuts={shortcut?.ariaKeyshortcuts}
         aria-label={`${thread.displayTitle}, ${project}, ${fullDate}${thread.isUnread ? ", Unread" : ""}${working ? ", Work in progress" : ""}`}
         className="flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-0.5 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring">
-        <span className="flex size-4 shrink-0 items-center justify-center" title={unreadHidesWork ? "Work in progress" : thread.indicatorLabel ?? undefined}>
-          <ThreadStatusGlyph indicator={unreadHidesWork ? "runtime" : indicator} rowStatus={rowStatus} size="compact" />
+        <span className="flex size-4 shrink-0 items-center justify-center" title={workIsHidden ? "Work in progress" : thread.indicatorLabel ?? undefined}>
+          <ThreadStatusGlyph indicator={workIsHidden ? "runtime" : indicator} rowStatus={rowStatus} size="compact" />
         </span>
         <span className="min-w-0 flex-1">
           <span className="flex min-w-0 items-center gap-1">
@@ -88,6 +87,7 @@ export function RecentThreadList({ activeThreadId, onNavigate }: PluginThreadLis
     return () => { current.dispose(); controller.current = null; };
   }, [sdk]);
   const threads = new Map(sidebar.threads.map(thread => [thread.id, thread]));
+  const working = workingThreadIds(threads);
   const projects = new Map(sidebar.projects.map(project => [project.id, project.name]));
   const retry = () => controller.current?.retry();
   const metadataMissing = (state.status === "ready" || state.status === "refreshing") && state.rows.some(row => {
@@ -127,7 +127,7 @@ export function RecentThreadList({ activeThreadId, onNavigate }: PluginThreadLis
           {visibleRows.map(row => {
             const thread = threads.get(row.threadId)!;
             return <RecentRow key={thread.id} thread={thread} project={projects.get(thread.projectId)!}
-              at={row.lastMessageAt} active={thread.id === activeThreadId} onNavigate={onNavigate} />;
+              at={row.lastMessageAt} active={thread.id === activeThreadId} working={working.has(thread.id)} onNavigate={onNavigate} />;
           })}
         </ul>}
   </section>;

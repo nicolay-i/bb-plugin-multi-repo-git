@@ -78,8 +78,10 @@ user/assistant messages and edits—not thread `updatedAt`. Opening, reading or
 renaming a chat does not move it. The search field filters titles and project
 names within those latest 50 chats, without reading message bodies or issuing
 additional RPCs. Clearing it restores the list. The central chat and draft are
-not navigated. Busy unread chats keep the work indicator on the left and an
-unread badge beside the bold title; idle unread chats keep their native dot.
+not navigated. Work reported by BB's live metadata is reflected in each chat and
+its ancestors, including working children outside the latest 50 conversations.
+Busy unread chats keep the work indicator on the left and an unread badge beside
+the bold title; idle unread chats keep their native dot.
 Refresh retains visible rows and search, while errors or disconnection hide
 unverified data.
 

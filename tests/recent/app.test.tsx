@@ -63,6 +63,28 @@ describe("Integrated Recent sidebar", () => {
     expect(unread?.parentElement?.classList.contains("flex")).toBe(true);
     expect(link.querySelector(".bb-thread-title")?.parentElement?.contains(unread)).toBe(true);
   });
+  it.each([true, false])("reflects child generation=%s on an idle unread parent outside the Recent result", async running => {
+    const parent = sidebarThread();
+    const child = { ...sidebarThread(), id: "thr_child", parentThreadId: parent.id,
+      runtimeStatus: running ? "active" as const : "idle" as const, indicator: "none" as const, isUnread: false };
+    const { slot } = await page(fixture(), [parent, child]);
+    const link = await slot.findByRole("link", { name: /Synthetic chat/ });
+    expect(!!link.querySelector('[data-thread-status-glyph="runtime"]')).toBe(running);
+    expect(link.getAttribute("aria-label")?.includes("Work in progress")).toBe(running);
+    expect(link.querySelector('[data-thread-status-glyph="unread-success"]')).not.toBeNull();
+    expect(link.querySelector(".bb-thread-title")?.classList.contains("font-semibold")).toBe(true);
+    expect(slot.getAllByRole("link")).toHaveLength(1);
+    expect(slot.container.querySelector('[data-sidebar-thread-id="thr_child"]')).toBeNull();
+  });
+  it("shows nested work on a read parent with no native status glyph", async () => {
+    const parent = { ...sidebarThread(), isUnread: false, indicator: "none" as const };
+    const child = { ...sidebarThread(), id: "thr_child", parentThreadId: parent.id, runtimeStatus: "active" as const };
+    const { slot } = await page(fixture(), [parent, child]);
+    const link = await slot.findByRole("link", { name: /Synthetic chat.*Work in progress/ });
+    expect(link.querySelector('[data-thread-status-glyph="runtime"]')).not.toBeNull();
+    expect(link.querySelector('[data-thread-status-glyph="unread-success"]')).toBeNull();
+    expect(link.getAttribute("aria-label")).not.toContain(", Unread");
+  });
   it("shows background work without masking an unread error", async () => {
     const row = sidebarThread(); row.indicator = "unread-error"; row.activity.backgroundAgents = 1;
     const { slot } = await page(fixture(), [row]);
