@@ -147,6 +147,79 @@ describe("RPC актуализация и жизненный цикл", () => {
     try { const { states } = await setup(f); expect(states.at(-1)?.status).toBe("ready"); }
     finally { clearInterval(flood); }
   });
+  it("loads 50 at a time, coalesces repeated scroll notifications and preserves the loaded extent on refresh", async () => {
+    const f = fixture(Array.from({ length: 125 }, (_, i) => thread(`thr_${String(i).padStart(3, "0")}`)));
+    for (let i = 0; i < 125; i++) f.histories.set(`thr_${String(i).padStart(3, "0")}`, [assistant(1000 + i)]);
+    const { c, states } = await setup(f);
+    expect(states.at(-1)?.rows).toHaveLength(50); expect(states.at(-1)?.hasMore).toBe(true);
+    f.calls.length = 0;
+    for (let i = 0; i < 20; i++) c.loadMore();
+    await wait(() => expect(states.at(-1)?.rows).toHaveLength(100));
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0]!.args.input.before).toEqual({ threadId: "thr_075", lastMessageAt: 1075 });
+    c.retry(); await wait(() => expect(states.at(-1)?.status).toBe("ready"));
+    expect(states.at(-1)?.rows).toHaveLength(100);
+    c.loadMore(); await wait(() => expect(states.at(-1)?.rows).toHaveLength(125));
+    expect(states.at(-1)?.hasMore).toBeUndefined();
+    const calls = f.calls.length; c.loadMore(); await new Promise(resolve => setTimeout(resolve, 30));
+    expect(f.calls).toHaveLength(calls);
+  });
+  it("message updates reorder loaded rows and insert newly recent chats without re-reading historical pages", async () => {
+    const f = fixture(Array.from({ length: 125 }, (_, i) => thread(`thr_${i}`)));
+    for (let i = 0; i < 125; i++) f.histories.set(`thr_${i}`, [assistant(1000 + i)]);
+    const { c, states } = await setup(f); c.loadMore();
+    await wait(() => expect(states.at(-1)?.rows).toHaveLength(100)); f.calls.length = 0;
+    f.histories.get("thr_40")!.push(user(9000)); f.emit(changed("thr_40"));
+    f.histories.get("thr_0")!.push(user(10000)); f.emit(changed("thr_0"));
+    await wait(() => expect(states.at(-1)?.rows[0]?.threadId).toBe("thr_0"));
+    expect(states.at(-1)?.rows).toHaveLength(101);
+    expect(states.at(-1)?.rows[1]).toEqual({ threadId: "thr_40", lastMessageAt: 9000 });
+    expect(f.calls).toHaveLength(1); expect(f.calls[0]!.args.input.threadIds).toEqual(["thr_40", "thr_0"]);
+    c.loadMore(); await wait(() => expect(states.at(-1)?.rows).toHaveLength(125));
+    expect(new Set(states.at(-1)!.rows.map(row => row.threadId)).size).toBe(125);
+  });
+  it("keeps verified pages on a pagination failure and retries only by explicit action", async () => {
+    const { f, c, states } = await setup(fixture(Array.from({ length: 65 }, (_, i) => thread(`thr_${i}`))));
+    f.setFailure(true); c.loadMore();
+    await wait(() => expect(states.at(-1)?.pageError).toBe("Could not load more chats."));
+    expect(states.at(-1)?.rows).toHaveLength(50);
+    const calls = f.calls.length;
+    vi.useFakeTimers();
+    try { await vi.advanceTimersByTimeAsync(60000); expect(f.calls).toHaveLength(calls); }
+    finally { vi.useRealTimers(); }
+    c.loadMore(); await new Promise(resolve => setTimeout(resolve, 30)); expect(f.calls).toHaveLength(calls);
+    f.setFailure(false); c.loadMore(true); await wait(() => expect(states.at(-1)?.rows).toHaveLength(65));
+    expect(states.at(-1)?.pageError).toBeUndefined();
+  });
+  it("finds an old chat outside the initial 50 and clears search back to the latest page", async () => {
+    const f = fixture(Array.from({ length: 80 }, (_, i) => thread(`thr_${i}`)));
+    for (let i = 0; i < 80; i++) { f.histories.set(`thr_${i}`, [assistant(1000 + i)]); f.labels.set(`thr_${i}`, i === 0 ? "Старый Чат" : "Another chat"); }
+    const { c, states } = await setup(f);
+    expect(states.at(-1)?.rows.some(row => row.threadId === "thr_0")).toBe(false);
+    c.setSearch(" СТАРЫЙ ");
+    await wait(() => expect(states.at(-1)).toEqual({ status: "ready", rows: [{ threadId: "thr_0", lastMessageAt: 1000 }] }));
+    c.setSearch(""); await wait(() => expect(states.at(-1)?.rows).toHaveLength(50));
+    expect(states.at(-1)?.rows[0]?.threadId).toBe("thr_79");
+  });
+  it("never publishes an old search response after the query changes", async () => {
+    const { f, c, states } = await setup(); let release!: () => void;
+    f.setReadHook(() => new Promise<void>(resolve => { release = resolve; }));
+    c.setSearch("synthetic"); await wait(() => expect(release).toBeTypeOf("function"));
+    const count = states.length; c.setSearch("does-not-match"); f.setReadHook(); release();
+    await wait(() => expect(states.at(-1)).toEqual({ status: "ready", rows: [] }));
+    expect(states.slice(count).filter(state => state.status === "ready").every(state => state.rows.length === 0)).toBe(true);
+  });
+  it("cancels a pending older page when a destructive change invalidates it", async () => {
+    const f = fixture(Array.from({ length: 80 }, (_, i) => thread(`thr_${i}`)));
+    const { c, states } = await setup(f); let release!: () => void;
+    f.setReadHook(() => new Promise<void>(resolve => { release = resolve; })); c.loadMore();
+    await wait(() => expect(release).toBeTypeOf("function")); const pending = f.calls.at(-1)!;
+    f.setRows(Array.from({ length: 79 }, (_, i) => thread(`thr_${i + 1}`)));
+    f.emit(changed("thr_0", ["thread-deleted"], [])); f.setReadHook(); release();
+    await wait(() => expect(states.at(-1)?.status).toBe("ready"));
+    expect(pending.args.signal.aborted).toBe(true); expect(states.at(-1)?.rows).toHaveLength(50);
+    expect(states.at(-1)?.rows.some(row => row.threadId === "thr_0")).toBe(false);
+  });
   it("events-appended вместе со status не инвалидирует snapshot как destructive", async () => {
     const { f, states } = await setup(); f.histories.get("thr_synthetic")!.push(assistant(900, 900));
     f.emit(changed("thr_synthetic", ["events-appended", "status-changed"], ["item/completed"]));

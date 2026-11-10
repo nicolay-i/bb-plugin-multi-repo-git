@@ -1,12 +1,23 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent } from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import type { PluginSidebarThread, PluginThreadListProps } from "@get-bb/plugin-sdk/app";
 import { assistant, fixture, thread } from "./fixtures";
 
 const slots: { lifecycle: { unmount(): void } }[] = [];
-afterEach(() => { for (const slot of slots.splice(0)) slot.lifecycle.unmount(); vi.restoreAllMocks(); });
+const intersections: { callback: IntersectionObserverCallback; targets: Set<Element> }[] = [];
+beforeEach(() => {
+  intersections.length = 0;
+  vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+  vi.stubGlobal("IntersectionObserver", class {
+    targets = new Set<Element>();
+    constructor(callback: IntersectionObserverCallback) { intersections.push({ callback, targets: this.targets }); }
+    observe(target: Element) { this.targets.add(target); }
+    disconnect() { this.targets.clear(); }
+  });
+});
+afterEach(() => { for (const slot of slots.splice(0)) slot.lifecycle.unmount(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 const sidebarThread = () => ({
   ...thread("thr_synthetic"), displayTitle: "Synthetic chat", href: "/projects/proj_synthetic/threads/thr_synthetic",
   indicator: "unread-success", indicatorLabel: "Unread", isUnread: true, isArchived: false, isHidden: false,
@@ -15,6 +26,7 @@ const sidebarThread = () => ({
 } as PluginSidebarThread);
 async function page(f = fixture(), rows = [sidebarThread()],
   options: Parameters<typeof renderSlot>[2] = {}, props: Partial<PluginThreadListProps> = {}) {
+  for (const row of rows) f.labels.set(row.id, `${row.displayTitle} Synthetic project`);
   const app = await loadPluginApp(() => import("../../app.js"));
   const onNavigate = vi.fn();
   const slot = renderSlot(app.threadLists.find(item => item.id === "recent")!, {
@@ -46,6 +58,7 @@ describe("Integrated Recent sidebar", () => {
     expect(link.getAttribute("aria-current")).toBe("page");
     expect(link.hasAttribute("data-sidebar-thread-shortcut-target")).toBe(true);
     expect(slot.queryByRole("main")).toBeNull();
+    expect(slot.getByRole("button", { name: "Refresh recent chats" }).innerHTML).toContain("ArrowReloadHorizontal");
   });
   it.each(["active", "provisioning", "starting", "stopping"] as const)("shows unread and %s work together", async runtimeStatus => {
     const { slot } = await page(fixture(), [{ ...sidebarThread(), runtimeStatus }]);
@@ -156,7 +169,7 @@ describe("Integrated Recent sidebar", () => {
     await vi.waitFor(() => expect(release).toBeTypeOf("function")); f.setReadHook(); release();
     expect(await slot.findByRole("link", { name: /Synthetic chat/ })).toBeTruthy();
   });
-  it("searches loaded chat titles and projects without additional RPCs", async () => {
+  it("searches chat titles and projects through the paged RPC", async () => {
     const f = fixture([thread("thr_synthetic"), thread("thr_second")]);
     const rows = [sidebarThread(), { ...sidebarThread(), id: "thr_second", displayTitle: "Другой чат", href: "/projects/proj_synthetic/threads/thr_second" }];
     const { slot } = await page(f, rows);
@@ -164,43 +177,78 @@ describe("Integrated Recent sidebar", () => {
     const reads = f.calls.length;
     const input = slot.getByRole("searchbox", { name: "Search recent chats" });
     fireEvent.change(input, { target: { value: "  SYNTHETIC CHAT " } });
+    await slot.findByRole("link", { name: /Synthetic chat/ });
     expect(slot.getAllByRole("link")).toHaveLength(1);
-    expect(slot.getByRole("link", { name: /Synthetic chat/ })).toBeTruthy();
     fireEvent.change(input, { target: { value: "ДРУГОЙ" } });
+    await slot.findByRole("link", { name: /Другой чат/ });
     expect(slot.getAllByRole("link")).toHaveLength(1);
-    expect(slot.getByRole("link", { name: /Другой чат/ })).toBeTruthy();
     fireEvent.change(input, { target: { value: "synthetic PROJECT" } });
-    expect(slot.getAllByRole("link")).toHaveLength(2);
+    await vi.waitFor(() => expect(slot.getAllByRole("link")).toHaveLength(2));
     fireEvent.change(input, { target: { value: "not-a-chat" } });
-    expect(slot.getByText("No recent chats match your search.")).toBeTruthy();
+    await slot.findByText("No chats match your search.");
     expect(slot.queryByRole("link")).toBeNull(); expect(slot.queryByRole("alert")).toBeNull();
     fireEvent.change(input, { target: { value: "" } });
-    expect(slot.getAllByRole("link")).toHaveLength(2);
-    expect(f.calls).toHaveLength(reads);
+    await vi.waitFor(() => expect(slot.getAllByRole("link")).toHaveLength(2));
+    expect(f.calls.length).toBeGreaterThan(reads);
     expect(slot.inspection.navigateCalls).toHaveLength(0);
   });
   it("does not hide data failures behind a search no-match state", async () => {
     const f = fixture(); f.setFailure(true); const { slot } = await page(f);
     fireEvent.change(slot.getByRole("searchbox"), { target: { value: "anything" } });
     expect(await slot.findByRole("alert")).toBeTruthy();
-    expect(slot.queryByText("No recent chats match your search.")).toBeNull();
+    expect(slot.queryByText("No chats match your search.")).toBeNull();
   });
   it("keeps row DOM and search through a refresh, without a loading replacement", async () => {
     const f = fixture(); const { slot } = await page(f);
     const link = await slot.findByRole("link", { name: /Synthetic chat/ });
     const input = slot.getByRole("searchbox");
     fireEvent.change(input, { target: { value: "Synthetic" } });
+    await slot.findByRole("link", { name: /Synthetic chat/ });
+    const searchedLink = slot.getByRole("link", { name: /Synthetic chat/ });
     let release!: () => void;
     f.setReadHook(() => new Promise<void>(resolve => { release = resolve; }));
     fireEvent.click(slot.getByRole("button", { name: "Refresh recent chats" }));
     expect(await slot.findByText("Updating recent chats…")).toBeTruthy();
-    expect(slot.getByRole("link", { name: /Synthetic chat/ })).toBe(link);
+    expect(slot.getByRole("link", { name: /Synthetic chat/ })).toBe(searchedLink);
     expect(slot.queryByText("Loading recent chats…")).toBeNull();
     expect((input as HTMLInputElement).value).toBe("Synthetic");
     await vi.waitFor(() => expect(release).toBeTypeOf("function"));
     f.setReadHook(); release();
     await vi.waitFor(() => expect(slot.queryByText("Updating recent chats…")).toBeNull());
-    expect(slot.getByRole("link", { name: /Synthetic chat/ })).toBe(link);
+    expect(slot.getByRole("link", { name: /Synthetic chat/ })).toBe(searchedLink);
+  });
+  it("automatically loads the next page at the scroll sentinel without replacing existing row DOM", async () => {
+    const rows = Array.from({ length: 80 }, (_, i) => ({ ...sidebarThread(), id: `thr_${i}`, displayTitle: `Chat ${i}`,
+      href: `/projects/proj_synthetic/threads/thr_${i}` }));
+    const f = fixture(rows.map(row => thread(row.id)));
+    for (let i = 0; i < 80; i++) f.histories.set(`thr_${i}`, [assistant(1000 + i)]);
+    const { slot } = await page(f, rows);
+    const link = await slot.findByRole("link", { name: /^Chat 79,/ });
+    const initialList = slot.getByRole("list");
+    expect(initialList.style.height).toBe("2098px");
+    expect(slot.getAllByRole("link").length).toBeLessThan(50);
+    const observer = intersections.find(item => item.targets.size)!;
+    for (let n = 0; n < 10; n++) observer.callback([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
+    await slot.findByText("All chats loaded.");
+    expect(slot.getByRole("list")).toBe(initialList); expect(initialList.style.height).toBe("3358px");
+    expect(slot.getByRole("link", { name: /^Chat 79,/ })).toBe(link);
+    expect(f.calls).toHaveLength(2);
+  });
+  it("finds a title outside the first page without scrolling, then returns to recent order", async () => {
+    const rows = Array.from({ length: 80 }, (_, i) => ({ ...sidebarThread(), id: `thr_${i}`, displayTitle: i === 0 ? "Старый Чат" : `Chat ${i}`,
+      href: `/projects/proj_synthetic/threads/thr_${i}` }));
+    const f = fixture(rows.map(row => thread(row.id)));
+    for (let i = 0; i < 80; i++) f.histories.set(`thr_${i}`, [assistant(1000 + i)]);
+    const { slot } = await page(f, rows);
+    await slot.findByRole("link", { name: /^Chat 79,/ });
+    expect(slot.queryByRole("link", { name: /Старый Чат/ })).toBeNull();
+    fireEvent.change(slot.getByRole("searchbox"), { target: { value: "СТАРЫЙ" } });
+    await slot.findByRole("link", { name: /Старый Чат/ });
+    expect(slot.getAllByRole("link")).toHaveLength(1);
+    expect(slot.getByText("All matching chats loaded.")).toBeTruthy();
+    fireEvent.change(slot.getByRole("searchbox"), { target: { value: "" } });
+    await slot.findByRole("link", { name: /^Chat 79,/ });
+    expect(slot.queryByRole("link", { name: /Старый Чат/ })).toBeNull();
   });
   it("does not change another project's environment when opening a row", async () => {
     const f = fixture([thread("thr_synthetic", { environmentId: "env_synthetic" })]);

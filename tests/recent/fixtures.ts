@@ -28,6 +28,7 @@ export function fixture(initial: ThreadEntry[] = [thread("thr_synthetic")]) {
   let rows = initial;
   const histories = new Map<string, EventRow[]>();
   for (const row of rows) histories.set(row.id, [user(100), assistant(200)]);
+  const labels = new Map<string, string>();
   let failure = false;
   let readHook: ((id: string) => Promise<void>) | undefined;
   const sdk: Sdk = {
@@ -43,7 +44,14 @@ export function fixture(initial: ThreadEntry[] = [thread("thr_synthetic")]) {
         });
         index.set(row.id, { lastMessageAt: times.length ? Math.max(...times) : null, lastSeq: 0 });
       }
-      return args.outputSchema.parse({ rows: topRecent(index), queryMs: 0 });
+      const { search, before, threadIds } = args.input;
+      for (const [id, value] of index) {
+        if (value.lastMessageAt === null || (threadIds && !threadIds.includes(id)) ||
+          (search && !(labels.get(id) ?? "Synthetic chat Synthetic project").toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())) ||
+          (before && (value.lastMessageAt > before.lastMessageAt || value.lastMessageAt === before.lastMessageAt && id <= before.threadId))) index.delete(id);
+      }
+      const page = topRecent(index);
+      return args.outputSchema.parse({ rows: page, nextCursor: index.size > 50 ? page.at(-1) : null, queryMs: 0 });
     } },
     subscribe: (args: any) => {
       const set = listeners.get(args.event) ?? new Set();
@@ -52,7 +60,7 @@ export function fixture(initial: ThreadEntry[] = [thread("thr_synthetic")]) {
       return () => { set.delete(args.callback); };
     },
   };
-  return { sdk, calls, histories, listeners,
+  return { sdk, calls, histories, listeners, labels,
     setRows(next: ThreadEntry[]) { rows = next; },
     setFailure(next: boolean) { failure = next; },
     setReadHook(next?: (id: string) => Promise<void>) { readHook = next; },

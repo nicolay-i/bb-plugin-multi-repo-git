@@ -1,18 +1,20 @@
 import { MESSAGE_TYPES, type RecentRow, type Sdk } from "./data";
-import { latestSchema } from "./schema";
+import { latestSchema, type RecentCursor } from "./schema";
 
-export type RecentState =
-  | { status: "loading"; rows: readonly RecentRow[] }
-  | { status: "ready"; rows: readonly RecentRow[] }
-  | { status: "refreshing"; rows: readonly RecentRow[] }
-  | { status: "error"; rows: readonly RecentRow[]; message: string };
+type PageFlags = { hasMore?: boolean; loadingMore?: boolean; pageError?: string };
+export type RecentState = PageFlags & (
+  | { status: "loading" | "ready" | "refreshing"; rows: readonly RecentRow[] }
+  | { status: "error"; rows: readonly RecentRow[]; message: string });
 
 const METADATA_ONLY = new Set(["read-state-changed", "title-changed", "pin-state-changed", "tabs-changed",
   "terminals-changed", "status-changed", "queue-changed", "interactions-changed"]);
+const compare = (a: RecentRow, b: RecentRow) => b.lastMessageAt - a.lastMessageAt ||
+  (a.threadId < b.threadId ? -1 : a.threadId > b.threadId ? 1 : 0);
 
 export class RecentController {
   private readonly lifetime = new AbortController();
   private readonly cleanup: (() => void)[] = [];
+  private readonly changedIds = new Set<string>();
   private request?: AbortController;
   private timer?: ReturnType<typeof setTimeout>;
   private connected = false;
@@ -20,7 +22,12 @@ export class RecentController {
   private pending = false;
   private running = false;
   private failed = false;
+  private pageFailed = false;
+  private full = true;
+  private more = false;
   private revision = 0;
+  private search = "";
+  private cursor: RecentCursor | null = null;
   private snapshot: readonly RecentRow[] | null = null;
 
   constructor(private readonly sdk: Sdk, private readonly changed: (state: RecentState) => void) {}
@@ -38,43 +45,53 @@ export class RecentController {
       }
     } }));
     this.cleanup.push(this.sdk.subscribe({ event: "thread:changed", callback: event => {
-      if (event.changes.length && event.changes.every(kind => METADATA_ONLY.has(kind))) return;
+      if (event.changes.length && event.changes.every(kind => METADATA_ONLY.has(kind))) {
+        if (this.search && event.changes.includes("title-changed")) this.retry();
+        return;
+      }
       const append = event.changes.includes("events-appended") &&
         event.changes.every(kind => kind === "events-appended" || METADATA_ONLY.has(kind));
       if (append && event.metadata?.eventTypes?.length &&
           !event.metadata.eventTypes.some(type => (MESSAGE_TYPES as readonly string[]).includes(type))) return;
-      if (append) {
-        // An exact snapshot may be published while new appends queue another
-        // refresh. Otherwise continuous tool completions starve initial ready.
-        this.pending = true;
-        // A failed request must not permanently suppress later data updates.
-        // Recover only on a new relevant event; no polling or retry timer loop.
-        if (this.failed) {
-          this.failed = false;
-          this.emit({ status: "loading", rows: [] });
-        }
+      if (append && event.id) {
+        // Revalidate the changed IDs, not every historical page on every message.
+        this.changedIds.add(event.id); this.pending = true;
+        if (this.failed) { this.failed = false; this.emit({ status: "loading", rows: [] }); }
         if (this.connected) this.schedule(1000);
       } else {
-        // Remove known unavailable rows immediately; retain the remaining snapshot
-        // visibly marked as updating rather than replacing the whole list.
-        if (event.changes.some(kind => kind === "thread-deleted" || kind === "archived-changed")) {
+        if (event.changes.some(kind => kind === "thread-deleted" || kind === "archived-changed"))
           this.snapshot = event.id ? this.snapshot?.filter(row => row.threadId !== event.id) ?? null : null;
-        }
-        this.retry(); // Destructive/unknown changes still invalidate in-flight requests.
+        this.retry();
       }
     } }));
     this.cleanup.push(this.sdk.subscribe({ event: "project:changed", callback: event => {
-      if (event.changes.length && event.changes.every(kind => ["project-updated", "project-sources-changed", "project-order-changed", "threads-changed"].includes(kind))) return;
+      if (event.changes.length && event.changes.every(kind => ["project-updated", "project-sources-changed", "project-order-changed", "threads-changed"].includes(kind)) &&
+          !(this.search && event.changes.includes("project-updated"))) return;
       this.retry();
     } }));
   }
 
+  setSearch(value: string): void {
+    const search = value.trim();
+    if (search.toLowerCase() === this.search.toLowerCase() || this.lifetime.signal.aborted) return;
+    this.search = search; this.snapshot = null; this.cursor = null;
+    this.retry();
+    if (this.timer !== undefined) clearTimeout(this.timer);
+    this.timer = undefined;
+    if (this.connected) this.schedule(250);
+  }
+
   retry = (): void => {
     if (this.lifetime.signal.aborted) return;
-    this.failed = false; this.pending = true; this.revision++;
-    this.request?.abort();
+    this.failed = false; this.pageFailed = false; this.pending = true; this.full = true; this.more = false; this.revision++;
+    this.changedIds.clear(); this.request?.abort();
     this.emit(this.snapshot ? { status: "refreshing", rows: this.snapshot } : { status: "loading", rows: [] });
     if (this.connected) this.schedule(0);
+  };
+
+  loadMore = (retry = false): void => {
+    if (!this.connected || this.running || this.pending || this.failed || this.pageFailed && !retry || !this.cursor || this.lifetime.signal.aborted) return;
+    this.pageFailed = false; this.more = true; this.schedule(0);
   };
 
   dispose(): void {
@@ -84,11 +101,15 @@ export class RecentController {
   }
 
   private emit(state: RecentState): void {
-    if (!this.lifetime.signal.aborted) {
-      if (state.status === "ready") this.snapshot = state.rows;
-      else if (state.status === "error" || state.status === "loading") this.snapshot = null;
-      this.changed(state);
-    }
+    if (this.lifetime.signal.aborted) return;
+    if (state.status === "ready") this.snapshot = state.rows;
+    else if (state.status === "error" || state.status === "loading") { this.snapshot = null; this.cursor = null; }
+    this.changed(state);
+  }
+
+  private ready(rows: readonly RecentRow[], flags: PageFlags = {}): void {
+    this.emit({ status: "ready", rows, ...(this.cursor ? { hasMore: true } : {}),
+      ...(this.pageFailed ? { pageError: "Could not load more chats." } : {}), ...flags });
   }
 
   private schedule(delay: number): void {
@@ -97,19 +118,52 @@ export class RecentController {
   }
 
   private async drain(): Promise<void> {
-    if (this.running || !this.pending || !this.connected || this.failed || this.lifetime.signal.aborted) return;
-    this.running = true; this.pending = false;
-    const epoch = this.revision;
+    if (this.running || (!this.pending && !this.more) || !this.connected || this.failed || this.lifetime.signal.aborted) return;
+    this.running = true;
+    const mode = this.full || !this.snapshot ? "full" : this.pending ? "changes" : "more";
+    const ids = [...this.changedIds].slice(0, 50);
+    for (const id of ids) this.changedIds.delete(id);
+    this.pending = this.changedIds.size > 0; this.full = false; this.more = false;
+    const epoch = this.revision, previous = this.snapshot;
     const request = this.request = new AbortController();
-    if (this.snapshot) this.emit({ status: "refreshing", rows: this.snapshot });
+    const current = () => epoch === this.revision && this.connected && !request.signal.aborted;
+    const fetch = (extra: { before?: RecentCursor; threadIds?: string[] } = {}) => this.sdk.plugins.callRpc({
+      pluginId: "multi-repo-git", method: "recent_latest", input: { ...(this.search ? { search: this.search } : {}), ...extra },
+      outputSchema: latestSchema, signal: request.signal });
+    if (previous) {
+      if (mode === "more") this.ready(previous, { loadingMore: true });
+      else this.emit({ status: "refreshing", rows: previous });
+    }
     try {
-      const result = await this.sdk.plugins.callRpc({ pluginId: "multi-repo-git", method: "recent_latest", input: {},
-        outputSchema: latestSchema, signal: request.signal });
-      if (epoch === this.revision && this.connected && !request.signal.aborted)
-        this.emit({ status: "ready", rows: result.rows });
+      if (mode === "full") {
+        // Explicit refresh preserves the loaded extent. Publish atomically;
+        // destructive events abort the whole refresh, including its later pages.
+        const rows = new Map<string, RecentRow>();
+        let before: RecentCursor | undefined;
+        let next: RecentCursor | null;
+        do {
+          const result = await fetch(before ? { before } : {});
+          if (!current()) return;
+          for (const row of result.rows) rows.set(row.threadId, row);
+          next = result.nextCursor; before = next ?? undefined;
+        } while (next && rows.size < Math.max(50, previous?.length ?? 0));
+        this.cursor = next;
+        this.ready([...rows.values()].sort(compare));
+      } else {
+        const result = await fetch(mode === "more" ? { before: this.cursor! } : { threadIds: ids });
+        if (!current()) return;
+        const rows = new Map(previous!.filter(row => mode !== "changes" || !ids.includes(row.threadId)).map(row => [row.threadId, row]));
+        for (const row of result.rows) {
+          if (mode === "more" || previous!.some(old => old.threadId === row.threadId) || !this.cursor || compare(row, this.cursor) <= 0)
+            rows.set(row.threadId, row);
+        }
+        if (mode === "more") this.cursor = result.nextCursor;
+        this.ready([...rows.values()].sort(compare));
+      }
     } catch {
-      if (this.lifetime.signal.aborted) return;
-      if (epoch === this.revision && this.connected && !request.signal.aborted) {
+      if (!current() || this.lifetime.signal.aborted) return;
+      if (mode === "more") { this.pageFailed = true; this.ready(previous!); }
+      else {
         this.failed = true;
         this.emit({ status: "error", rows: [], message: "Could not load recent chats. Retry using Refresh." });
       }

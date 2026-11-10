@@ -6,7 +6,7 @@
 Group folder-based **subprojects inside one workspace**, then choose where to
 chat: about the whole project in **main**, or within a specific subproject.
 Set how many thread families each project shows, with independent **Show more**
-controls. Switch to **Recent** for the latest 50 conversations, with title/project
+controls. Switch to **Recent** for a continuously paged conversation list, with title/project
 search and simultaneous work/unread indicators. Repository-local **Source Control**
 is also included.
 
@@ -28,7 +28,7 @@ Workspace membership is one level: a child project cannot itself own a workspace
 
 ## Compatibility
 
-Version **0.1.3** requires **BB ≥0.48.1, SDK ≥0.6.104 and Node ≥24.20.0**,
+Version **0.1.4** requires **BB ≥0.48.1, SDK ≥0.6.104 and Node ≥24.20.0**,
 with the built-in `thread-list` provider for Workspaces. Earlier v0.1.2 releases
 retain their previous requirements.
 
@@ -47,8 +47,9 @@ BB layouts need separate verification.
 
 ## Current features
 
-- **Workspaces | Recent** switches between the native project tree and the latest
-  50 conversations, with local title/project search and native chat actions;
+- **Workspaces | Recent** switches between the native project tree and a
+  continuously paged conversation list, with global title/project search and
+  native chat actions;
 - work and unread indicators remain visible together, without shifting titles;
 - **Edit workspace** groups selected child folders as real BB projects,
   reusing matching projects and their available machine sources where possible;
@@ -72,25 +73,36 @@ The domain model and parity requirements are documented in
 ## Workspaces / Recent
 
 Use **Workspaces | Recent** above the left sidebar list. Workspaces keeps BB's
-native project tree, workspace grouping and pagination. Recent shows the latest
-50 visible, non-archived conversations across all projects, ordered by saved
-user/assistant messages and edits—not thread `updatedAt`. Opening, reading or
-renaming a chat does not move it. The search field filters titles and project
-names within those latest 50 chats, without reading message bodies or issuing
-additional RPCs. Clearing it restores the list. The central chat and draft are
-not navigated. Work reported by BB's live metadata is reflected in each chat and
-its ancestors, including working children outside the latest 50 conversations.
+native project tree, workspace grouping and pagination. Recent starts with the
+latest 50 visible, non-archived conversations with saved messages across all
+projects and loads 50 more as you approach the bottom. A cursor uses the latest eligible message date
+and thread ID, so older messages from an already shown chat cannot duplicate it.
+Ordering follows saved user/assistant messages and edits—not thread `updatedAt`.
+Opening, reading or renaming a chat does not move it.
+
+Search covers titles and project names across **all active, visible chats with
+saved messages**, not only loaded pages. Results use the same 50-row pagination; message bodies are not
+searched or downloaded. Input is debounced, and changing the query cancels obsolete
+requests. Clearing search returns to the latest page. Only visible rows and a
+small overscan are mounted; focused rows and open native menus remain mounted.
+The central chat and draft are not navigated. Work reported by BB's live metadata
+is reflected in each chat and its ancestors, including working children outside
+the loaded pages.
 Busy unread chats keep the work indicator on the left and an unread badge beside
 the bold title; idle unread chats keep their native dot.
-Refresh retains visible rows and search, while errors or disconnection hide
-unverified data.
+Refresh retains visible rows, search and the loaded extent. Message updates
+revalidate changed IDs in bounded batches rather than re-reading every loaded
+page. A failed older-page request keeps already verified pages and offers
+**Retry loading more**, without automatic retries. Refresh failures or a lost
+connection hide data that cannot be verified.
 
 The mode preference is shared across BB clients. Switching uses revision checks;
 a concurrent change produces an explicit retry message rather than overwriting
 another client. Registration does not write the preference. If BB is using its
 Automatic mode or another provider, choose Workspaces or Recent explicitly to
 select one of these modes; BB's Automatic provider choice is left unchanged.
-Concurrent Recent reads share one worker only within the same persisted-data revision.
+Concurrent Recent reads share one worker only for identical search, cursor and
+thread filters within the same persisted-data revision.
 Closing the last reader aborts that worker; changed data cannot reuse its snapshot.
 Each query uses an isolated Node child process. The reader closes its snapshot
 before returning validated metadata over IPC, without waiting for process
@@ -181,7 +193,7 @@ BB does not own those historical paths either.
 ## Install from GitHub
 
 ```bash
-bb plugin install 'git:https://github.com/nicolay-i/bb-plugin-multi-repo-git.git@^0.1.3' --yes
+bb plugin install 'git:https://github.com/nicolay-i/bb-plugin-multi-repo-git.git@^0.1.4' --yes
 ```
 
 ## Screenshots

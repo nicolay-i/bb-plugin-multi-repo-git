@@ -13,7 +13,9 @@ function database(path = ":memory:") {
   let closed = false;
   const close = () => { if (!closed) { db.close(); closed = true; } };
   cleanups.push(close);
-  db.exec(`CREATE TABLE threads(id TEXT PRIMARY KEY,visibility TEXT DEFAULT 'visible',archived_at INTEGER,deleted_at INTEGER,updated_at INTEGER);
+  db.exec(`CREATE TABLE threads(id TEXT PRIMARY KEY,visibility TEXT DEFAULT 'visible',archived_at INTEGER,deleted_at INTEGER,updated_at INTEGER,project_id TEXT DEFAULT 'proj_test',title TEXT,title_fallback TEXT);
+    CREATE TABLE projects(id TEXT PRIMARY KEY,name TEXT,deleted_at INTEGER);
+    INSERT INTO projects VALUES('proj_test','Synthetic project',NULL);
     CREATE TABLE events(id TEXT PRIMARY KEY,thread_id TEXT,sequence INTEGER,created_at INTEGER,type TEXT,item_kind TEXT,parent_tool_call_id TEXT,data TEXT);
     CREATE INDEX events_thread_type_sequence_idx ON events(thread_id,type,sequence);
     CREATE INDEX events_thread_type_item_kind_sequence_idx ON events(thread_id,type,item_kind,sequence);
@@ -21,7 +23,7 @@ function database(path = ":memory:") {
   let next = 0;
   const histories = new Map<string, EventRow[]>();
   function thread(id: string, visibility = "visible", archived: number | null = null, deleted: number | null = null) {
-    db.prepare("INSERT INTO threads VALUES(?,?,?,?,?)").run(id, visibility, archived, deleted, 999999);
+    db.prepare("INSERT INTO threads(id,visibility,archived_at,deleted_at,updated_at) VALUES(?,?,?,?,?)").run(id, visibility, archived, deleted, 999999);
     histories.set(id, []);
   }
   function add(id: string, row: EventRow, options: { nullKind?: boolean; parent?: string } = {}) {
@@ -30,10 +32,11 @@ function database(path = ":memory:") {
       options.nullKind ? null : item?.type ?? null, options.parent ?? item?.parentToolCallId ?? null, JSON.stringify(row.data));
     histories.get(id)!.push(row);
   }
-  function oracle() {
+  function oracle(excluded = new Set<string>()) {
     const index = new Map<string, MessageIndex>();
     for (const row of db.prepare("SELECT id FROM threads WHERE visibility='visible' AND archived_at IS NULL AND deleted_at IS NULL").all() as { id: string }[]) {
       const times = histories.get(row.id)!.flatMap(event => { const at = messageTime(event); return at === null ? [] : [at]; });
+      if (excluded.has(row.id)) continue;
       index.set(row.id, { lastMessageAt: times.length ? Math.max(...times) : null, lastSeq: 0 });
     }
     return topRecent(index);
@@ -67,7 +70,7 @@ describe("Точный read-only server query", () => {
     const prepare = vi.spyOn(f.db, "prepare");
     expect(queryLatest(f.db).rows).toEqual(f.oracle());
     const sql = prepare.mock.calls.find(([sql]) => sql.includes("WITH recent_ids"))![0];
-    const plan = f.db.prepare("EXPLAIN QUERY PLAN " + sql).all(1000) as { detail: string }[];
+    const plan = f.db.prepare("EXPLAIN QUERY PLAN " + sql).all({ cutoff: 1000, upper: Number.MAX_SAFE_INTEGER, matches: "[]" }) as { detail: string }[];
     expect(plan.some(row => row.detail.includes("events_completed_item_truncation_idx") && row.detail.includes("created_at>"))).toBe(true);
     expect(plan.some(row => row.detail.includes("events_thread_type_item_kind_sequence_idx"))).toBe(false);
     prepare.mockRestore();
@@ -144,13 +147,92 @@ describe("Точный read-only server query", () => {
   it("does not count scheduler pauses as query CPU work", () => {
     const f = database(); f.thread("thr_one"); f.add("thr_one", user(100, 1));
     vi.spyOn(performance, "now").mockReturnValueOnce(0).mockReturnValue(10000);
-    expect(queryLatest(f.db)).toEqual({ rows: [{ threadId: "thr_one", lastMessageAt: 100 }], queryMs: 10000 });
+    expect(queryLatest(f.db)).toEqual({ rows: [{ threadId: "thr_one", lastMessageAt: 100 }], nextCursor: null, queryMs: 10000 });
   });
   it("still rejects a query that exhausts its CPU work budget", () => {
     const f = database(); f.thread("thr_one"); f.add("thr_one", user(100, 1));
     vi.spyOn(process, "cpuUsage").mockReturnValueOnce({ user: 0, system: 0 }).mockReturnValue({ user: 6000000, system: 0 });
     expect(() => queryLatest(f.db)).toThrow();
   });
+  it("pages through every thread once, including ties and older messages from already shown threads", () => {
+    const f = database();
+    for (let i = 0; i < 127; i++) {
+      const id = `thr_${String(i).padStart(3, "0")}`; f.thread(id);
+      f.add(id, user(i % 5, 1));
+      f.add(id, assistant(1000 + i % 3, 2), { nullKind: i % 7 === 0 });
+      f.add(id, user(1000 + i % 4, 3));
+      f.add(id, tool(999999, 4));
+    }
+    const seen = new Set<string>(); let before;
+    for (let n = 0; n < 3; n++) {
+      const page = queryLatest(f.db, 50, 5000, { before });
+      expect(page.rows).toEqual(f.oracle(seen));
+      for (const row of page.rows) { expect(seen.has(row.threadId)).toBe(false); seen.add(row.threadId); }
+      before = page.nextCursor ?? undefined;
+    }
+    expect(before).toBeUndefined(); expect(seen.size).toBe(127);
+  });
+  it("searches older titles and projects with Unicode case folding and literal wildcard characters", () => {
+    const f = database();
+    for (let i = 0; i < 70; i++) { const id = `thr_${i}`; f.thread(id); f.add(id, assistant(1000 + i, 1)); }
+    f.db.prepare("UPDATE threads SET title='Старый ЧАТ 100%_' WHERE id='thr_0'").run();
+    f.add("thr_0", assistant(900, 2, { text: "Distinctive body text that is not a title" }));
+    expect(queryLatest(f.db, 50, 5000, { search: "distinctive body text" }).rows).toEqual([]);
+    expect(queryLatest(f.db, 50, 5000, { search: "  СТАРЫЙ чат 100%_  " }).rows).toEqual([{ threadId: "thr_0", lastMessageAt: 1000 }]);
+    expect(queryLatest(f.db, 50, 5000, { search: "not-a-chat" }).rows).toEqual([]);
+    expect(queryLatest(f.db, 50, 5000, { search: "SYNTHETIC PROJECT" }).rows).toEqual(f.oracle());
+    expect(queryLatest(f.db, 50, 5000, { threadIds: ["thr_0", "thr_1"] }).rows).toHaveLength(2);
+    expect(queryLatest(f.db, 50, 5000, { threadIds: [] }).rows).toEqual([]);
+  });
+  it("streams broad search matches from the date index instead of sorting every matching history", () => {
+    const f = database();
+    for (let i = 0; i < 80; i++) { const id = `thr_${i}`; f.thread(id); f.add(id, assistant(1000 + i, 1)); }
+    const prepare = vi.spyOn(f.db, "prepare");
+    expect(queryLatest(f.db, 50, 5000, { search: "Synthetic project" }).rows).toEqual(f.oracle());
+    const sql = prepare.mock.calls.map(([sql]) => sql).find(sql => sql.startsWith("SELECT e.thread_id"))!;
+    expect(sql).toContain("INDEXED BY events_completed_item_truncation_idx");
+    expect(sql).not.toContain("events_thread_type_item_kind_sequence_idx");
+    expect(sql).not.toContain("JOIN events");
+  });
+  it("keeps the cursor valid when an older thread receives a new saved message between pages", () => {
+    const f = database();
+    for (let i = 0; i < 120; i++) { const id = `thr_${i}`; f.thread(id); f.add(id, assistant(i, 1)); }
+    const first = queryLatest(f.db);
+    f.add("thr_0", user(99999, 2));
+    const next = queryLatest(f.db, 50, 5000, { before: first.nextCursor! });
+    expect(next.rows).toHaveLength(50);
+    expect(next.rows.some(row => row.threadId === "thr_0")).toBe(false);
+    expect(new Set([...first.rows, ...next.rows].map(row => row.threadId)).size).toBe(100);
+  });
+  it("cursor witnesses use global date ranges and native metadata membership, not nested historical thread walks", () => {
+    const f = database(); f.thread("thr_one"); f.add("thr_one", assistant(100, 1));
+    const prepare = vi.spyOn(f.db, "prepare");
+    expect(queryLatest(f.db, 50, 5000, { before: { threadId: "thr_cutoff", lastMessageAt: 200 } }).rows).toHaveLength(1);
+    const witnesses = prepare.mock.calls.map(([sql]) => sql).filter(sql => sql.includes("recent_unseen"));
+    expect(witnesses).toHaveLength(2);
+    for (const sql of witnesses) {
+      const plan = f.db.prepare("EXPLAIN QUERY PLAN " + sql).all({ matches: '["thr_one"]', cutoff: 200,
+        upper: Number.MAX_SAFE_INTEGER, cursorId: "thr_cutoff" }) as { detail: string }[];
+      expect(plan.some(row => row.detail.includes("events_completed_item_truncation_idx") && row.detail.includes("created_at>"))).toBe(true);
+    }
+    expect(prepare.mock.calls.some(([sql]) => sql.startsWith("SELECT 1 FROM events"))).toBe(false);
+  });
+  it("bounds deep-page work on 500,000 historical messages without a new database index", () => {
+    const f = database();
+    const insert = f.db.prepare("INSERT INTO events VALUES(?,?,?,?,?,?,?,?)");
+    const body = JSON.stringify({ item: { type: "agentMessage", text: "Synthetic benchmark ".repeat(20) } });
+    f.db.exec("BEGIN");
+    for (let i = 0; i < 2000; i++) {
+      const id = `thr_${String(i).padStart(5, "0")}`; f.thread(id);
+      for (let n = 0; n < 250; n++) insert.run(`evt_${i}_${n}`, id, n + 1, n === 249 ? 100000 + i : n,
+        "item/completed", "agentMessage", null, body);
+    }
+    f.db.exec("COMMIT");
+    const first = queryLatest(f.db);
+    const last = queryLatest(f.db, 50, 5000, { before: { lastMessageAt: 100050, threadId: "thr_00050" } });
+    expect(first.rows).toHaveLength(50); expect(last.rows).toHaveLength(50); expect(last.nextCursor).toBeNull();
+    console.info("Recent 500k-message spike", { firstMs: first.queryMs, finalPageMs: last.queryMs });
+  }, 60000);
   it("фактически работает в node:sqlite readOnly; запись отказана, файл не изменён", () => {
     const base = resolve(".tmp"); mkdirSync(base, { recursive: true }); const dir = mkdtempSync(join(base, "sqlite-unit-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));

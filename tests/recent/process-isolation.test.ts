@@ -54,8 +54,10 @@ describe("Recent SQLite process isolation", () => {
         insert.run(`write_${writes}`, "thr_000", writes + 1, 100000 + writes, "client/turn/requested", null, JSON.stringify({ initiator: "user", input: [{ type: "text", text: "Synthetic concurrent write" }] }));
       };
       write(); timer = setInterval(write, 5);
+      let before: { threadId: string; lastMessageAt: number } | null = null;
       for (let i = 0; i < 8; i++) {
-        let result: { rows: { threadId: string; lastMessageAt: number }[] } | undefined;
+        const paged = i % 2 === 1;
+        let result: { rows: { threadId: string; lastMessageAt: number }[]; nextCursor: { threadId: string; lastMessageAt: number } | null } | undefined;
         let pid: number | undefined;
         const child = fork(workerPath, [path], { stdio: ["ignore", "ignore", "ignore", "ipc"], execArgv: ["--no-warnings"] });
         children.add(child);
@@ -63,14 +65,15 @@ describe("Recent SQLite process isolation", () => {
           const budget = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("Child reader stalled")); }, 8000);
           child.on("error", reject);
           child.on("message", (message: any) => {
-            if (message.phase === "opened") pid = message.pid;
+            if (message.phase === "opened") { pid = message.pid; child.send(paged ? { before } : {}); }
             if (message.phase === "result") result = message.result;
           });
           child.on("close", code => { clearTimeout(budget); children.delete(child); code === 0 ? resolve() : reject(new Error("Reader failed")); });
         });
         expect(pid).toBe(child.pid); expect(pid).not.toBe(process.pid);
-        expect(result?.rows).toHaveLength(50);
-        expect(result?.rows[0]?.threadId).toBe("thr_000");
+        expect(result?.rows).toHaveLength(paged ? 30 : 50);
+        if (paged) expect(result?.rows.some(row => row.threadId === "thr_000")).toBe(false);
+        else { expect(result?.rows[0]?.threadId).toBe("thr_000"); before = result!.nextCursor; }
         expect(statSync(path + "-shm").ino).toBe(shm.ino);
         expect(statSync(path + "-shm").size).toBeGreaterThanOrEqual(shm.size);
         expect(reader.prepare("SELECT count(*) n FROM events").get()).toEqual({ n: 80 });

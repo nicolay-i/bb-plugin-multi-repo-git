@@ -16,12 +16,14 @@ async function host(slow = false) {
     writeFileSync(join(dir, "lib/recent/query-worker.mjs"), `import{writeFileSync,appendFileSync}from'node:fs';writeFileSync(${JSON.stringify(pidFile)},'started');setInterval(()=>appendFileSync(${JSON.stringify(pidFile)},'.'),10);`);
   } else {
     const db = new DatabaseSync(join(dir, "bb.db"));
-    db.exec(`CREATE TABLE threads(id TEXT PRIMARY KEY,visibility TEXT,archived_at INTEGER,deleted_at INTEGER);
+    db.exec(`CREATE TABLE threads(id TEXT PRIMARY KEY,visibility TEXT,archived_at INTEGER,deleted_at INTEGER,project_id TEXT DEFAULT 'proj_test',title TEXT DEFAULT 'Synthetic chat',title_fallback TEXT);
+      CREATE TABLE projects(id TEXT PRIMARY KEY,name TEXT,deleted_at INTEGER);
+      INSERT INTO projects VALUES('proj_test','Synthetic project',NULL);
       CREATE TABLE events(id TEXT PRIMARY KEY,thread_id TEXT,sequence INTEGER,created_at INTEGER,type TEXT,item_kind TEXT,parent_tool_call_id TEXT,data TEXT);
       CREATE INDEX events_thread_type_sequence_idx ON events(thread_id,type,sequence);
       CREATE INDEX events_thread_type_item_kind_sequence_idx ON events(thread_id,type,item_kind,sequence);
       CREATE INDEX events_completed_item_truncation_idx ON events(item_kind,created_at,id) WHERE type='item/completed';
-      INSERT INTO threads VALUES('thr_synthetic','visible',NULL,NULL);`);
+      INSERT INTO threads(id,visibility,archived_at,deleted_at) VALUES('thr_synthetic','visible',NULL,NULL);`);
     db.prepare("INSERT INTO events VALUES(?,?,?,?,?,?,?,?)").run("evt_synthetic", "thr_synthetic", 1, 100,
       "client/turn/requested", null, null, JSON.stringify({ initiator: "user", input: [{ type: "text", text: "synthetic" }] }));
     db.close();
@@ -37,7 +39,7 @@ async function host(slow = false) {
 describe("Server RPC boundary and real worker lifecycle", () => {
   it("выполняет native read-only worker и возвращает только bounded metadata", async () => {
     const { harness } = await host();
-    expect(await harness.callRpc("recent_latest", {})).toEqual({ rows: [{ threadId: "thr_synthetic", lastMessageAt: 100 }], queryMs: expect.any(Number) });
+    expect(await harness.callRpc("recent_latest", {})).toEqual({ rows: [{ threadId: "thr_synthetic", lastMessageAt: 100 }], nextCursor: null, queryMs: expect.any(Number) });
     const line = harness.logEntries.find(entry => entry.message.startsWith("recent-query "))!.message;
     const metrics = JSON.parse(line.slice("recent-query ".length));
     expect(metrics).toMatchObject({ reason: "success", activeAtStart: 1, maxWorkersSinceReload: 1,
@@ -45,6 +47,10 @@ describe("Server RPC boundary and real worker lifecycle", () => {
     expect(metrics.workerPid).not.toBe(process.pid);
     expect(line).not.toMatch(/thr_synthetic|synthetic|bb\.db|rows|text/);
     await expect(harness.callRpc("recent_latest", { sql: "SELECT anything", path: "outside" })).rejects.toThrow();
+  });
+  it("accepts a bounded Unicode query even when lowercasing expands its length", async () => {
+    const h = await host();
+    expect(await h.harness.callRpc("recent_latest", { search: "İ".repeat(500) })).toMatchObject({ rows: [], nextCursor: null });
   });
   it("does not inherit server NODE_OPTIONS preloads into the child", async () => {
     const previous = process.env.NODE_OPTIONS;
@@ -64,6 +70,20 @@ describe("Server RPC boundary and real worker lifecycle", () => {
     ]);
     expect(a).toEqual(b);
     expect(h.harness.logEntries.filter(entry => entry.message.startsWith("recent-query "))).toHaveLength(1);
+  });
+  it("does not share a worker across different searches or cursors", async () => {
+    const h = await host();
+    const [latest, search, older] = await Promise.all([
+      h.harness.callRpc("recent_latest", {}),
+      h.harness.callRpc("recent_latest", { search: "not-a-chat" }),
+      h.harness.callRpc("recent_latest", { before: { threadId: "thr_synthetic", lastMessageAt: 100 } }),
+    ]);
+    expect(latest).toMatchObject({ rows: [{ threadId: "thr_synthetic" }] });
+    expect(search).toMatchObject({ rows: [] }); expect(older).toMatchObject({ rows: [] });
+    expect(h.harness.logEntries.filter(entry => entry.message.startsWith("recent-query "))).toHaveLength(3);
+    for (const input of [{ search: "a".repeat(501) }, { before: { lastMessageAt: 100 } }, { threadIds: Array(51).fill("thr_synthetic") }])
+      await expect(h.harness.callRpc("recent_latest", input)).rejects.toThrow();
+    expect(h.harness.logEntries.filter(entry => entry.message.startsWith("recent-query "))).toHaveLength(3);
   });
   it("does not reuse an in-flight snapshot after a persisted-data invalidation", async () => {
     const h = await host();
@@ -86,8 +106,8 @@ describe("Server RPC boundary and real worker lifecycle", () => {
   it("returns the validated result without waiting for worker teardown", async () => {
     const h = await host(true);
     writeFileSync(join(h.dir, "lib/recent/query-worker.mjs"), `process.send({phase:'finished',queryMs:1,wallMs:1,cpuMs:1});
-      process.send({phase:'result',result:{rows:[],queryMs:1}});setInterval(()=>{},1000);`);
-    expect(await h.harness.callRpc("recent_latest", {})).toEqual({ rows: [], queryMs: 1 });
+      process.send({phase:'result',result:{rows:[],nextCursor:null,queryMs:1}});setInterval(()=>{},1000);`);
+    expect(await h.harness.callRpc("recent_latest", {})).toEqual({ rows: [], nextCursor: null, queryMs: 1 });
     expect(h.harness.logEntries.some(entry => entry.message.startsWith("recent-worker-exit "))).toBe(false);
     await h.harness.dispose();
   });

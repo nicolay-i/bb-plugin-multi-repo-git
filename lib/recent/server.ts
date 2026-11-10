@@ -2,10 +2,10 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { latestSchema } from "./schema.js";
+import { latestSchema, pageInputSchema, type PageInput } from "./schema.js";
 
 export const rpcContract = defineRpcContract({
-  recent_latest: { input: z.object({}).strict(), output: latestSchema },
+  recent_latest: { input: pageInputSchema, output: latestSchema },
 });
 const duration = z.number().finite().nonnegative().max(86400000);
 const workerMessage = z.discriminatedUnion("phase", [
@@ -24,10 +24,10 @@ export default function registerRecent(bb: BbPluginApi): void {
   const subscriptions: (() => void)[] = [];
   let requestId = 0, maxWorkers = 0, revision = 0;
   let watching = false, disposed = false;
-  let flight: { revision: number; controller: AbortController; promise: Promise<Result>; readers: number } | undefined;
+  const flights = new Map<string, { revision: number; controller: AbortController; promise: Promise<Result>; readers: number }>();
   bb.onDispose(async () => {
     disposed = true;
-    flight?.controller.abort();
+    for (const flight of flights.values()) flight.controller.abort();
     for (const off of subscriptions) off();
     await Promise.all([...workers].map(worker => new Promise<void>(resolve => {
       worker.once("close", () => resolve());
@@ -35,7 +35,7 @@ export default function registerRecent(bb: BbPluginApi): void {
     })));
   });
 
-  async function execute(signal: AbortSignal): Promise<Result> {
+  async function execute(signal: AbortSignal, input: PageInput): Promise<Result> {
     if (signal.aborted || disposed) throw new Error("Request cancelled.");
     if (!workerPath) {
       const installed = (await bb.sdk.plugins.list()).plugins.find(plugin => plugin.id === bb.pluginId);
@@ -85,6 +85,7 @@ export default function registerRecent(bb: BbPluginApi): void {
             cancel("invalid-output"); return;
           }
           telemetry = frame;
+          if (frame.phase === "opened") worker.send(input, error => { if (error) cancel("worker-error"); });
           if (frame.phase === "failed") cancel("worker-error");
         }
       });
@@ -99,7 +100,7 @@ export default function registerRecent(bb: BbPluginApi): void {
   }
 
   bb.rpc.register(rpcContract, {
-    recent_latest: (_input, { experimental_signal: signal }) => {
+    recent_latest: (input, { experimental_signal: signal }) => {
       if (signal.aborted || disposed) return Promise.reject(new Error("Request cancelled."));
       if (!watching) {
         // Never share a snapshot across a persisted-data invalidation.
@@ -107,14 +108,16 @@ export default function registerRecent(bb: BbPluginApi): void {
         subscriptions.push(bb.sdk.subscribe({ event: "project:changed", callback: () => { revision++; } }));
         watching = true;
       }
-      if (!flight || flight.revision !== revision || flight.controller.signal.aborted) {
+      const key = JSON.stringify({ ...input, search: input.search.toLowerCase() });
+      let current = flights.get(key);
+      if (!current || current.revision !== revision || current.controller.signal.aborted) {
         const controller = new AbortController();
-        const current = { revision, controller, promise: execute(controller.signal), readers: 0 };
-        flight = current;
-        const clear = () => { if (flight === current) flight = undefined; };
+        current = { revision, controller, promise: execute(controller.signal, input), readers: 0 };
+        flights.set(key, current);
+        const entry = current;
+        const clear = () => { if (flights.get(key) === entry) flights.delete(key); };
         void current.promise.then(clear, clear);
       }
-      const current = flight;
       current.readers++;
       return new Promise<Result>((resolve, reject) => {
         let done = false;
